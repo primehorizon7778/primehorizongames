@@ -268,6 +268,14 @@ label{display:block;font-size:10px;font-weight:700;color:var(--muted);margin-bot
   font-variant-numeric: tabular-nums;
 }
 
+
+.game-tile.coming-soon,.gtile.coming-soon{opacity:.9}
+.gtile.coming-soon .ds{animation:soonBlink 1.2s ease-in-out infinite;color:#f5c542!important;font-weight:700}
+@keyframes soonBlink{0%,100%{opacity:1}50%{opacity:.3}}
+.gtile[data-id="pool"]{background:linear-gradient(160deg,#0a6a42 0%,#13a064 40%,#6a3a14 100%)!important;border:1px solid #2bd18a55}
+.gtile[data-id="ludo"]{background:linear-gradient(135deg,#e8352f 0%,#25b062 35%,#f7b900 70%,#2f6fe8 100%)!important;border:1px solid #fff3}
+.gtile[data-id="carrom"]{background:linear-gradient(160deg,#8a5a2b,#5b3714 50%,#e9c98c)!important;border:1px solid #c9a22755}
+.gtile[data-id="aviator"]{background:linear-gradient(160deg,#0f1424,#1b2740 50%,#9f1239)!important;border:1px solid #e11d4855}
 </style>
 </head>
 <body>
@@ -656,9 +664,9 @@ const GAMES=[
   {id:'ludo',name:'Ludo',ico:'🎲',ds:'vs Computer · Friends',live:true,intro:'Classic Ludo. Play vs Computer or match with friends online.'},
   {id:'pool',name:'8 Ball Pool',ico:'🎱',ds:'vs Computer · Friends',live:true,intro:'Realistic 8-ball. Play vs Computer or match with friends online.'},
   {id:'carrom',name:'Carrom Ball',ico:'🎯',ds:'vs Computer · Friends',live:true,intro:'Realistic Carrom. Play vs Computer or match with friends online.'},
-  {id:'terminal',name:'Trade Desk',ico:'📈',ds:'Buy & sell',live:false,intro:'Trade the live chart.'},
-  {id:'mines',name:'Diamond Mines',ico:'💎',ds:'5×5 grid',live:false,intro:'Find gems, avoid mines. Cash out anytime.'},
-  {id:'spin',name:'Fortune Wheel',ico:'🎡',ds:'Spin win',live:false,intro:'Spin for a multiplier.'}
+  {id:'soon1',name:'New Games',ico:'✨',ds:'Coming soon...',live:false,comingSoon:true,intro:''},
+  {id:'soon2',name:'New Games',ico:'🚀',ds:'Coming soon...',live:false,comingSoon:true,intro:''},
+  {id:'soon3',name:'New Games',ico:'🎮',ds:'Coming soon...',live:false,comingSoon:true,intro:''}
 ];
 const PACKAGES=[500,1000,2500,5000,10000,25000];
 
@@ -793,7 +801,7 @@ function refreshBal(){
 function showIntro(g){document.getElementById('intro-ico').innerText=g.ico;document.getElementById('intro-title').innerText=g.name;document.getElementById('intro-text').innerText=g.intro;document.getElementById('intro').classList.add('show')}
 function closeIntro(){document.getElementById('intro').classList.remove('show')}
 
-document.getElementById('game-grid').innerHTML=GAMES.map(g=>`<div class="gtile" onclick="openGame('${g.id}')"><div class="ico">${g.ico}</div><div class="nm">${g.name}</div><div class="ds">${g.ds}</div></div>`).join('');
+document.getElementById('game-grid').innerHTML=GAMES.map(g=>`<div class="gtile${g.comingSoon?' coming-soon':''}" data-id="${g.id}" onclick="openGame('${g.id}')"><div class="ico">${g.ico}</div><div class="nm">${g.name}</div><div class="ds">${g.ds}</div></div>`).join('');
 document.getElementById('coin-packages').innerHTML=PACKAGES.map(c=>`<div class="p" onclick="pickPkg(${c})"><b>${fmt(c)}</b><span class="muted">Rs ${fmt(c/COIN_RATE)}</span></div>`).join('');
 
 function pushWinFeed(name,game,amount,cur){db.ref('gamesHub/liveWins').push({name:name||'Player',game,amount,cur:cur||'rs',ts:Date.now()})}
@@ -1299,6 +1307,9 @@ async function creditWin(amount,title,gameName,applyTax){
 
 function openGame(id){
   if(!sessionUser)return toast('Login first','err');
+  const g0=GAMES.find(x=>x.id===id);
+  if(g0 && g0.comingSoon){ toast('New Games coming soon...','ok'); return; }
+
   currentGame=id;playMode='ai';currency='rs';setCurrency('rs');
   const g=GAMES.find(x=>x.id===id);document.getElementById('game-title').innerText=g.name;
   document.getElementById('btn-cashout').style.display='none';document.getElementById('match-area').style.display='none';
@@ -1465,6 +1476,7 @@ function openTableFullscreen(gameId, bet, oppName, vsBot){
 
   const stage=document.getElementById('table-fs-stage');
   window._tableFS={gameId,bet,oppName,vsBot,locked:true};
+  setPresenceBusy(true);
 
   document.getElementById('table-fs-menu-btn').onclick=()=>{
     const m=document.getElementById('table-fs-menu');
@@ -1525,6 +1537,7 @@ function closeTableFullscreen(){
   if(window._poolRAF){cancelAnimationFrame(window._poolRAF);window._poolRAF=null}
   document.getElementById('table-fs')?.remove();
   document.body.style.overflow='';
+  setPresenceBusy(false);
   if(window._tableBackHandler){
     window.removeEventListener('popstate', window._tableBackHandler);
     window._tableBackHandler=null;
@@ -1551,14 +1564,63 @@ function showMatchingUI(statusHtml){
     <div class="maint-spinner" style="margin:0 auto 16px"></div>
     <div class="stage-title" style="color:var(--gold)">Matching…</div>
     <p class="muted" id="match-live-status" style="margin-top:10px;font-weight:700">${statusHtml||'Looking for online players'}</p>
-    <p class="muted" style="margin-top:6px;font-size:11px">Game is locked until someone accepts</p>
+    <p id="match-online-count" style="margin-top:12px;font-size:15px;font-weight:700;color:#4ade80">Online: …</p>
+    <p id="match-timer" class="muted" style="margin-top:6px;font-size:12px">Request: 60s</p>
+    <button class="btn btn-soft" style="width:100%;margin-top:18px;padding:14px;background:#b91c1c;color:#fff;border:0" onclick="cancelFriendsMatch()">✕ Cancel Request (Refund)</button>
+    <p class="muted" style="margin-top:10px;font-size:11px">Back disabled while matching</p>
   </div>`;
-  document.getElementById('match-area').style.display='block';
-  const ms = document.getElementById('match-status');
-  if(ms) ms.innerHTML = statusHtml || 'Matching…';
+  document.getElementById('match-area').style.display='none';
   document.getElementById('btn-start').style.display='none';
   document.getElementById('btn-cashout').style.display='none';
+  // Disable back while matching
+  window._matchBackLock = true;
+  refreshOnlineCount();
+  startMatchTimer();
 }
+
+async function refreshOnlineCount(){
+  const el=document.getElementById('match-online-count');
+  if(!el) return;
+  try{
+    const snap=await db.ref('gamesHub/presence').once('value');
+    let n=0;
+    if(snap.exists()) snap.forEach(ch=>{
+      const v=ch.val()||{};
+      // online, not self, not busy
+      if(ch.key!==sessionPhone && !v.busy && (v.online||v.ts)) n++;
+    });
+    el.textContent = 'Online players: '+n;
+  }catch(e){ el.textContent='Online: —'; }
+}
+
+let _matchTimerIv=null, _matchDeadline=0;
+function startMatchTimer(){
+  if(_matchTimerIv) clearInterval(_matchTimerIv);
+  _matchDeadline = Date.now()+60000;
+  _matchTimerIv=setInterval(async()=>{
+    const left=Math.max(0, Math.ceil((_matchDeadline-Date.now())/1000));
+    const el=document.getElementById('match-timer');
+    if(el) el.textContent='Request: '+left+'s';
+    if(left%5===0) refreshOnlineCount();
+    if(left<=0){
+      clearInterval(_matchTimerIv); _matchTimerIv=null;
+      // Ask continue or cancel
+      const cont=confirm('1 minute ho gaya. Matching continue karein?\nOK = continue 1 min\nCancel = refund');
+      if(cont){
+        _matchDeadline=Date.now()+60000;
+        startMatchTimer();
+        try{ await broadcastMatchInvite({game:currentGame, gameName:currentGame, matchId:friendsMatchId, bet:window._friendBet||10, currency}); }catch(e){}
+      } else {
+        cancelFriendsMatch();
+      }
+    }
+  },1000);
+}
+function stopMatchTimer(){
+  if(_matchTimerIv){ clearInterval(_matchTimerIv); _matchTimerIv=null; }
+  window._matchBackLock=false;
+}
+
 
 async function startFriendsMatch(gameId, bet){
   if(bet < 10) return toast('Min bet Rs 10','err');
@@ -1653,10 +1715,10 @@ function listenFriendsMatch(gameId, bet){
 }
 
 function unlockFriendsGame(gameId, bet, oppName){
+  stopMatchTimer();
   window._friendBet = bet;
   window._friendGame = gameId;
   window._friendOppName = oppName;
-  // Fullscreen locked game
   openTableFullscreen(gameId, bet, oppName||'Opponent', false);
   document.getElementById('match-area').style.display='none';
   toast('Matched! You vs '+(oppName||'Opponent'),'ok');
@@ -1694,7 +1756,8 @@ async function settleFriendsMatch(winnerPhone){
 }
 
 async function cancelFriendsMatch(){
-  if(!friendsMatchId || !currentGame) return;
+  stopMatchTimer();
+  if(!friendsMatchId || !currentGame){ window._matchBackLock=false; if(currentGame) renderModeSelect(currentGame); return; }
   const gameId = currentGame;
   const snap = await db.ref('gamesHub/match/'+gameId+'/'+friendsMatchId).once('value');
   const m = snap.val();
@@ -1707,9 +1770,12 @@ async function cancelFriendsMatch(){
   }
   friendsMatchId=null;
   window._friendGameStarted=false;
+  window._matchBackLock=false;
   document.getElementById('match-area').style.display='none';
-  document.getElementById('btn-start').style.display='block';
+  document.getElementById('btn-start').style.display='none';
   setBetButtonsIdle();
+  setPresenceBusy(false);
+  if(currentGame) renderModeSelect(currentGame);
 }
 
 function cashOutCurrent(){
@@ -1844,41 +1910,56 @@ async function cancelMatch(){
 /* GAMES implementations (compact) */
 
 /* ===== REALISTIC AVIATOR (Sky Rise) — from standalone ===== */
+
+/* ===== REAL AVIATOR (from aviator.html standalone) ===== */
 function aviHTML(){
-  return `<div id="real-avi" style="display:flex;flex-direction:column;gap:8px">
-    <div style="display:flex;align-items:center;gap:10px">
-      <div style="font-size:13px;opacity:.7">Multiplier history</div>
-      <div id="avi-hist" style="display:flex;gap:6px;overflow:hidden;flex:1;flex-direction:row-reverse;justify-content:flex-end"></div>
+  return `<div id="real-avi" style="display:flex;flex-direction:column;gap:6px;height:100%;min-height:0;color:#e8ecf4">
+    <div style="display:flex;align-items:center;gap:8px;flex:none">
+      <div id="avi-hist" style="display:flex;gap:5px;overflow:hidden;flex:1;flex-direction:row-reverse;justify-content:flex-end;min-height:28px"></div>
     </div>
-    <canvas id="avi-canvas" style="width:100%;height:42vh;display:block;border-radius:14px;background:#0f1424"></canvas>
-    <div style="display:flex;flex-direction:column;gap:8px;background:#141a2c;border-radius:14px;padding:10px">
+    <canvas id="avi-canvas" style="width:100%;flex:1;min-height:200px;display:block;border-radius:14px;background:#0f1424"></canvas>
+    <div style="display:flex;flex-direction:column;gap:8px;background:#141a2c;border-radius:14px;padding:10px;flex:none;margin-bottom:env(safe-area-inset-bottom,6px)">
       <div style="display:flex;gap:8px;align-items:center">
-        <label style="font-size:13px;opacity:.75;flex:2">Auto cash out at</label>
-        <input id="avi-auto" type="number" step="0.1" inputmode="decimal" placeholder="off" style="flex:2;height:38px;border-radius:10px;border:0;font-size:16px;background:#1f2942;color:#e8ecf4;text-align:center;width:100%">
+        <button type="button" onclick="aviAdj(-10)" style="flex:1;height:40px;border-radius:10px;border:0;font-size:18px;font-weight:600;background:#1f2942;color:#e8ecf4">−</button>
+        <input id="avi-amt" type="number" value="10" inputmode="numeric" style="flex:2;height:40px;border-radius:10px;border:0;font-size:17px;background:#1f2942;color:#e8ecf4;text-align:center">
+        <button type="button" onclick="aviAdj(10)" style="flex:1;height:40px;border-radius:10px;border:0;font-size:18px;font-weight:600;background:#1f2942;color:#e8ecf4">+</button>
       </div>
-      <button id="avi-go" onclick="aviAct()" style="height:56px;border-radius:14px;border:0;font-size:18px;font-weight:700;color:#fff;background:#16a34a;width:100%">Bet</button>
+      <div style="display:flex;gap:6px">
+        <button type="button" onclick="aviSetA(10)" style="flex:1;height:36px;border-radius:10px;border:0;background:#1f2942;color:#e8ecf4;font-weight:600">10</button>
+        <button type="button" onclick="aviSetA(50)" style="flex:1;height:36px;border-radius:10px;border:0;background:#1f2942;color:#e8ecf4;font-weight:600">50</button>
+        <button type="button" onclick="aviSetA(100)" style="flex:1;height:36px;border-radius:10px;border:0;background:#1f2942;color:#e8ecf4;font-weight:600">100</button>
+        <button type="button" onclick="aviSetA(500)" style="flex:1;height:36px;border-radius:10px;border:0;background:#1f2942;color:#e8ecf4;font-weight:600">500</button>
+      </div>
+      <div style="display:flex;gap:8px;align-items:center">
+        <label style="font-size:12px;opacity:.75;flex:2">Auto cash out</label>
+        <input id="avi-auto" type="number" step="0.1" inputmode="decimal" placeholder="off" style="flex:2;height:40px;border-radius:10px;border:0;font-size:16px;background:#1f2942;color:#e8ecf4;text-align:center">
+      </div>
+      <button id="avi-go" onclick="aviAct()" style="height:58px;border-radius:14px;border:0;font-size:18px;font-weight:700;color:#fff;background:#16a34a;width:100%">Bet</button>
     </div>
   </div>`;
 }
 
-let _avi = null;
+window.aviAdj = function(d){ const el=document.getElementById('avi-amt'); if(el) el.value=Math.max(10,(parseInt(el.value)||10)+d); };
+window.aviSetA = function(v){ const el=document.getElementById('avi-amt'); if(el) el.value=Math.max(10,Math.floor(v)); };
+
 function runAviator(bet, isDemo){
-  const cv = document.getElementById('avi-canvas');
+  const cv=document.getElementById('avi-canvas');
   if(!cv) return;
-  const g = cv.getContext('2d');
-  const K = 0.1;
+  const g=cv.getContext('2d'), K=0.1;
   let ph='wait', t0=Date.now(), crash=1, m=1, placed=false, cashed=0, queued=false, crashAt=0, W=0, H=0, ac;
-  let currentBet = isDemo ? 0 : bet;
-  let hist = [];
+  let currentBet = isDemo?0:bet;
+  let hist=[];
+  if(document.getElementById('avi-amt') && bet) document.getElementById('avi-amt').value=bet;
 
   function size(){
-    const d = devicePixelRatio||1;
-    W = cv.clientWidth; H = cv.clientHeight;
-    cv.width = W*d; cv.height = H*d;
+    const d=devicePixelRatio||1;
+    W=cv.clientWidth||320; H=cv.clientHeight||240;
+    cv.width=W*d; cv.height=H*d;
     g.setTransform(d,0,0,d,0,0);
   }
   size();
-  window.addEventListener('resize', size);
+  const ro=new ResizeObserver(()=>size());
+  try{ ro.observe(cv); }catch(e){}
 
   function beep(f,t=.1,ty='triangle',f2){
     try{
@@ -1895,10 +1976,10 @@ function runAviator(bet, isDemo){
 
   function out(x){
     if(isDemo) return;
-    cashed = x;
-    const win = currentBet * x;
-    creditWin(win, 'Sky Rise cashout', 'aviator', false);
-    toast('Cashed out '+x.toFixed(2)+'x → +'+fmt(win), 'ok');
+    cashed=x;
+    const win=currentBet*x;
+    creditWin(win,'Sky Rise cashout','aviator',false);
+    toast('Cashed '+x.toFixed(2)+'x → +'+fmt(win),'ok');
     beep(660,.12); setTimeout(()=>beep(880,.2),110);
     setBetButtonsIdle();
   }
@@ -1906,33 +1987,31 @@ function runAviator(bet, isDemo){
   function newRound(){
     ph='wait'; t0=Date.now(); m=1; cashed=0; placed=false;
     const r=Math.random();
-    crash = r<.03 ? 1 : Math.min(200, Math.max(1, Math.floor(97/(1-r))/100));
+    crash=r<.03?1:Math.min(200,Math.max(1,Math.floor(97/(1-r))/100));
+    // house force-loss
+    if(window._forceLossThisRound && crash>1.5) crash=1+Math.random()*0.4;
     if(queued && !isDemo){
       queued=false;
-      // auto place next
-      currentBet = Number(document.getElementById('bet-amount')?.value)||currentBet;
-      if(currentBet>=10){
-        deductBet(currentBet).then(()=>{ placed=true; }).catch(e=>toast(e.message,'err'));
+      const amt=Math.floor(+document.getElementById('avi-amt')?.value)||currentBet;
+      if(amt>=10){
+        deductBet(amt).then(()=>{ currentBet=amt; placed=true; }).catch(e=>toast(e.message,'err'));
       }
     }
   }
 
-  window.aviAct = function(){
+  window.aviAct=function(){
     if(isDemo) return;
-    if(placed && !cashed && ph=='fly') return out(m);
-    if(placed && !cashed && ph=='wait'){
-      // cancel - refund
-      creditWin(currentBet, 'Bet cancel', 'aviator', false);
-      placed=false;
-      toast('Bet cancelled','ok');
-      setBetButtonsIdle();
-      return;
+    if(placed && !cashed && ph==='fly') return out(m);
+    if(placed && !cashed && ph==='wait'){
+      creditWin(currentBet,'Bet cancel','aviator',false);
+      placed=false; toast('Bet cancelled','ok'); setBetButtonsIdle(); return;
     }
     if(queued){ queued=false; return; }
-    if(ph=='wait' && !placed){
-      // place is done via startAviator already
-      placed=true;
-    } else if(ph!='wait'){
+    if(ph==='wait' && !placed){
+      const amt=Math.floor(+document.getElementById('avi-amt')?.value)||0;
+      if(amt<10) return toast('Min bet 10','err');
+      deductBet(amt).then(()=>{ currentBet=amt; placed=true; setBetButtonsPlaying(); }).catch(e=>toast(e.message,'err'));
+    } else if(ph!=='wait'){
       queued=true;
     }
   };
@@ -1958,12 +2037,12 @@ function runAviator(bet, isDemo){
       g.beginPath(); g.moveTo(0,0); g.arc(0,0,W*2,i*Math.PI/12,(i+1)*Math.PI/12); g.fill();
     }
     g.restore();
-    const t = ph=='fly' ? (now-t0)/1000 : ph=='crash' ? Math.log(crash)/K : 0;
+    const t=ph==='fly'?(now-t0)/1000:ph==='crash'?Math.log(crash)/K:0;
     const T=Math.max(8,t), Mx=Math.max(2,m);
-    const P = tt => [36+(W-72)*.8*(tt/T), H-34-(H-80)*.85*((Math.exp(K*tt)-1)/(Mx-1))];
+    const P=tt=>[36+(W-72)*.8*(tt/T), H-34-(H-80)*.85*((Math.exp(K*tt)-1)/(Mx-1))];
     g.strokeStyle='#2a3558'; g.lineWidth=1;
     g.beginPath(); g.moveTo(36,10); g.lineTo(36,H-34); g.lineTo(W-10,H-34); g.stroke();
-    if(ph!='wait'){
+    if(ph!=='wait'){
       g.beginPath(); g.moveTo(36,H-34);
       for(let i=0;i<=60;i++){ const[x,y]=P(t*i/60); g.lineTo(x,y); }
       const[ex,ey]=P(t); g.lineTo(ex,H-34); g.closePath();
@@ -1974,90 +2053,112 @@ function runAviator(bet, isDemo){
       const[px,py]=P(Math.max(0,t-.3));
       const a=Math.max(-.9,Math.min(0,Math.atan2(ey-py,ex-px)));
       let x=ex,y=ey;
-      if(ph=='crash'){ const d=now-crashAt; x+=d*.6; y-=d*.3; }
+      if(ph==='crash'){ const d=now-crashAt; x+=d*.6; y-=d*.3; }
       if(x<W+60) plane(x,y,a,now/40);
     } else {
       plane(36,H-34,-.1,now/40);
     }
     g.textAlign='center'; g.textBaseline='middle';
-    if(ph=='wait'){
+    if(ph==='wait'){
       const l=Math.max(0,5-(now-t0)/1000);
       g.fillStyle='#e8ecf4'; g.font='600 22px system-ui';
       g.fillText('Next round in '+l.toFixed(1)+'s', W/2, H/2);
       g.fillStyle='#1f2942'; g.fillRect(W/2-80,H/2+24,160,6);
       g.fillStyle='#e11d48'; g.fillRect(W/2-80,H/2+24,160*l/5,6);
-    } else if(ph=='fly'){
-      g.fillStyle='#fff'; g.font='700 58px system-ui';
+    } else if(ph==='fly'){
+      g.fillStyle='#fff'; g.font='700 56px system-ui';
       g.fillText(m.toFixed(2)+'x', W/2, H/2);
     } else {
       g.fillStyle='#fb7185'; g.font='600 20px system-ui';
       g.fillText('Flew away!', W/2, H/2-36);
-      g.font='700 58px system-ui';
+      g.font='700 56px system-ui';
       g.fillText(crash.toFixed(2)+'x', W/2, H/2+10);
     }
   }
 
   function ui(){
-    const go = document.getElementById('avi-go');
+    const go=document.getElementById('avi-go');
     if(!go) return;
-    let tx, cl='';
-    if(placed && !cashed && ph=='fly'){ tx='Cash out '+(currentBet*m).toFixed(2); cl='out'; go.style.background='#f59e0b'; go.style.color='#1a1200'; }
-    else if(placed && !cashed && ph=='wait'){ tx='Cancel bet ('+currentBet+')'; go.style.background='#b91c1c'; go.style.color='#fff'; }
-    else if(queued){ tx='Cancel next bet'; go.style.background='#b91c1c'; go.style.color='#fff'; }
-    else if(placed && cashed){ tx='Won '+(currentBet*cashed).toFixed(2)+' at '+cashed.toFixed(2)+'x'; go.style.background='#166534'; go.style.color='#fff'; }
-    else if(placed && ph=='crash'){ tx='Lost '+currentBet; go.style.background='#3a4258'; go.style.color='#aab'; }
-    else { tx = ph=='wait' ? 'Waiting…' : 'Bet next round'; go.style.background='#16a34a'; go.style.color='#fff'; }
-    go.textContent = tx;
-    const h = document.getElementById('avi-hist');
-    if(h) h.innerHTML = hist.slice(-12).map(v=>`<span style="padding:4px 8px;border-radius:12px;font-size:12px;font-weight:700;background:#1b2740;color:${v>=10?'#f472b6':v>=2?'#c084fc':'#60a5fa'};flex:none">${v.toFixed(2)}x</span>`).join('');
+    if(placed&&!cashed&&ph==='fly'){ go.textContent='Cash out '+(currentBet*m).toFixed(2); go.style.background='#f59e0b'; go.style.color='#1a1200'; }
+    else if(placed&&!cashed&&ph==='wait'){ go.textContent='Cancel bet ('+currentBet+')'; go.style.background='#b91c1c'; go.style.color='#fff'; }
+    else if(queued){ go.textContent='Cancel next bet'; go.style.background='#b91c1c'; go.style.color='#fff'; }
+    else if(placed&&cashed){ go.textContent='Won '+(currentBet*cashed).toFixed(2)+' at '+cashed.toFixed(2)+'x'; go.style.background='#166534'; go.style.color='#fff'; }
+    else if(placed&&ph==='crash'){ go.textContent='Lost '+currentBet; go.style.background='#3a4258'; go.style.color='#aab'; }
+    else { go.textContent = ph==='wait' ? ('Bet '+(document.getElementById('avi-amt')?.value||'')) : 'Bet next round'; go.style.background='#16a34a'; go.style.color='#fff'; }
+    const h=document.getElementById('avi-hist');
+    if(h) h.innerHTML=hist.slice(-12).map(v=>`<span style="padding:4px 8px;border-radius:12px;font-size:12px;font-weight:700;background:#1b2740;color:${v>=10?'#f472b6':v>=2?'#c084fc':'#60a5fa'};flex:none">${v.toFixed(2)}x</span>`).join('');
   }
 
-  // auto cashout check
   function getAuto(){ return parseFloat(document.getElementById('avi-auto')?.value)||0; }
 
-  let raf = null;
+  let raf=null;
   function loop(){
-    const now = Date.now();
-    if(ph=='wait'){
-      if(now-t0>=5000){ ph='fly'; t0=now; if(!isDemo && currentBet>0) placed=true; }
-    } else if(ph=='fly'){
-      m = Math.exp(K*(now-t0)/1000);
-      const a = getAuto();
-      if(placed && !cashed && a>1 && m>=a) out(a);
+    const now=Date.now();
+    if(ph==='wait'){ if(now-t0>=5000){ ph='fly'; t0=now; if(!isDemo&&currentBet>0) placed=true; } }
+    else if(ph==='fly'){
+      m=Math.exp(K*(now-t0)/1000);
+      const a=getAuto();
+      if(placed&&!cashed&&a>1&&m>=a) out(a);
       if(m>=crash){
         m=crash; ph='crash'; crashAt=now;
         hist.push(crash); if(hist.length>20) hist.shift();
         beep(300,.5,'sawtooth',60);
-        if(placed && !cashed && !isDemo){
-          toast('Crashed at '+crash.toFixed(2)+'x','err');
-          setBetButtonsIdle();
-        }
+        if(placed&&!cashed&&!isDemo){ toast('Crashed at '+crash.toFixed(2)+'x','err'); setBetButtonsIdle(); }
       }
-    } else if(now-crashAt>3500){
-      newRound();
-    }
+    } else if(now-crashAt>3500) newRound();
     draw(now); ui();
-    raf = requestAnimationFrame(loop);
+    raf=requestAnimationFrame(loop);
+    window._aviRaf=raf;
   }
-  if(window._aviRaf) cancelAnimationFrame(window._aviRaf);
-  window._aviRaf = raf;
-  // expose cash for main cashOut button
-  window._aviCash = async function(){
-    if(placed && !cashed && ph=='fly') out(m);
-  };
-  if(!isDemo && currentBet>0){ placed=true; }
+  window._aviCash=async function(){ if(placed&&!cashed&&ph==='fly') out(m); };
+  if(!isDemo && currentBet>0) placed=true;
   newRound();
-  if(!isDemo){ ph='wait'; t0=Date.now(); } // start countdown
   loop();
-  _avi = { stop(){ if(raf) cancelAnimationFrame(raf); } };
+  _avi={ stop(){ if(raf) cancelAnimationFrame(raf); try{ro.disconnect()}catch(e){} } };
 }
 
 async function startAviator(bet){
   await deductBet(bet);
   stopDemo();
-  const d=document.getElementById('avi-demo'); if(d) d.style.display='none';
   setBetButtonsPlaying();
-  runAviator(bet, false);
+  setPresenceBusy(true);
+  openAviatorFullscreen(bet);
+}
+
+function openAviatorFullscreen(bet){
+  document.getElementById('avi-fs')?.remove();
+  const ov=document.createElement('div');
+  ov.id='avi-fs';
+  ov.style.cssText='position:fixed;inset:0;z-index:99998;background:#0b0f1a;display:flex;flex-direction:column;';
+  ov.innerHTML=`
+    <div style="display:flex;align-items:center;justify-content:space-between;padding:8px 12px;flex:none">
+      <button id="avi-fs-close" style="background:#ffffff22;border:1px solid #fff4;color:#fff;border-radius:10px;padding:8px 12px;font-weight:700">✕</button>
+      <div style="color:#fff;font-weight:700">✈️ Sky Rise</div>
+      <div id="avi-fs-bal" style="color:#4ade80;font-weight:700;font-size:13px"></div>
+    </div>
+    <div id="avi-fs-stage" style="flex:1;min-height:0;padding:0 8px 8px;display:flex;flex-direction:column;overflow:hidden"></div>
+  `;
+  document.body.appendChild(ov);
+  document.body.style.overflow='hidden';
+  document.getElementById('avi-fs-close').onclick=()=>{
+    if(!confirm('Leave Sky Rise?')) return;
+    closeAviatorFullscreen();
+  };
+  document.getElementById('avi-fs-stage').innerHTML=aviHTML();
+  runAviator(bet,false);
+  try{
+    const bal=currency==='rs'?(Number(sessionUser.balance)||0):(parseInt(sessionUser.coinsCommission)||0);
+    document.getElementById('avi-fs-bal').textContent=(currency==='rs'?'Rs ':'')+fmt(bal);
+  }catch(e){}
+}
+function closeAviatorFullscreen(){
+  try{ if(window._aviRaf) cancelAnimationFrame(window._aviRaf); }catch(e){}
+  try{ if(window._avi&&window._avi.stop) window._avi.stop(); }catch(e){}
+  document.getElementById('avi-fs')?.remove();
+  document.body.style.overflow='';
+  setPresenceBusy(false);
+  setBetButtonsIdle();
+  if(currentGame==='aviator') renderStage(true);
 }
 
 function termHTML(){return `<div class="demo-tag" id="term-demo"><i class="fas fa-circle"></i> DEMO</div><canvas id="term-canvas" height="140"></canvas><div style="display:flex;justify-content:space-between;margin:8px 0"><div style="font-size:24px;font-weight:900;color:var(--cyan)" id="term-price">100.00</div><div class="muted" id="term-pos">—</div></div><div style="display:flex;gap:8px"><button class="btn btn-cyan" style="flex:1" onclick="termSide('buy')" id="tb">BUY</button><button class="btn btn-pink" style="flex:1" onclick="termSide('sell')" id="ts">SELL</button></div>`}
@@ -2397,6 +2498,13 @@ function setupCarromPieces(){
 }
 
 /** Broadcast match invite to all online app users */
+function setPresenceBusy(busy){
+  window._userBusy = !!busy;
+  try{
+    if(sessionPhone) db.ref('gamesHub/presence/'+sessionPhone).update({ busy: !!busy, busyGame: busy? (currentGame||'') : null, ts: Date.now() });
+  }catch(e){}
+}
+
 async function broadcastMatchInvite({game,gameName,matchId,bet,currency}){
   const payload={
     game,gameName,matchId,bet,currency,
@@ -2419,6 +2527,8 @@ async function broadcastMatchInvite({game,gameName,matchId,bet,currency}){
 }
 
 function showMatchNotify(n, inviteKey){
+  if(window._userBusy) return; // already in a game
+
   if(!n||n.host===sessionPhone)return;
   if(Date.now()>(n.expires||0))return;
   pendingMatch={...n, inviteKey};
@@ -5683,6 +5793,135 @@ async function startPool(bet){
   setBetButtonsPlaying();
   toast('Pool started','ok');
 }
+
+
+
+/* ===== 10 OCT GAMES LAUNCH CELEBRATION (once per user) ===== */
+const LAUNCH_KEY = 'ga_launch_oct10_seen';
+const LAUNCH_DATE = new Date(2026, 9, 10); // 10 Oct 2026 (month 0-indexed)
+
+function shouldShowLaunchCeleb(){
+  try{
+    if(localStorage.getItem(LAUNCH_KEY)) return false;
+  }catch(e){}
+  const now = new Date();
+  // Show on/after 10 Oct 2026
+  return now >= LAUNCH_DATE;
+}
+
+function markLaunchSeen(){
+  try{ localStorage.setItem(LAUNCH_KEY, '1'); }catch(e){}
+}
+
+function showLaunchCelebration(){
+  if(!shouldShowLaunchCeleb()) return;
+  if(document.getElementById('launch-celeb')) return;
+
+  const name = (sessionUser && (sessionUser.username||sessionUser.name)) || 'Player';
+  const ov = document.createElement('div');
+  ov.id = 'launch-celeb';
+  ov.style.cssText = 'position:fixed;inset:0;z-index:999999;background:radial-gradient(circle at 50% 40%,#1a237e,#0a0f2a 70%);display:flex;flex-direction:column;align-items:center;justify-content:center;overflow:hidden;';
+  ov.innerHTML = `
+    <canvas id="launch-fw" style="position:absolute;inset:0;width:100%;height:100%;pointer-events:none"></canvas>
+    <div style="position:relative;z-index:2;text-align:center;padding:24px 20px;max-width:360px">
+      <div style="font-size:56px;margin-bottom:8px;animation:lcBounce 1s ease infinite">🎉</div>
+      <div style="font-size:28px;font-weight:800;color:#ffd54a;text-shadow:0 0 24px #f5c542,0 2px 8px #000;margin-bottom:6px">Games Are Live!</div>
+      <div style="font-size:15px;color:#e8ecf4;line-height:1.5;margin-bottom:8px">
+        <b style="color:#fff">${esc(name)}</b>, hamari games aa gayi hain!
+      </div>
+      <div style="font-size:13px;color:#aab;margin-bottom:22px">Ludo · Pool · Carrom · Sky Rise · Mines<br>Abhi play karo aur jeeto</div>
+      <button id="launch-play-btn" style="width:100%;padding:16px;font-size:18px;font-weight:800;border:0;border-radius:14px;background:linear-gradient(135deg,#f5c542,#e6a817);color:#1a1200;box-shadow:0 8px 24px #f5c54255;cursor:pointer">
+        ▶ Play Now
+      </button>
+    </div>
+    <style>
+      @keyframes lcBounce{0%,100%{transform:translateY(0)}50%{transform:translateY(-10px)}}
+    
+.game-tile.coming-soon,.gtile.coming-soon{opacity:.9}
+.gtile.coming-soon .ds{animation:soonBlink 1.2s ease-in-out infinite;color:#f5c542!important;font-weight:700}
+@keyframes soonBlink{0%,100%{opacity:1}50%{opacity:.3}}
+.gtile[data-id="pool"]{background:linear-gradient(160deg,#0a6a42 0%,#13a064 40%,#6a3a14 100%)!important;border:1px solid #2bd18a55}
+.gtile[data-id="ludo"]{background:linear-gradient(135deg,#e8352f 0%,#25b062 35%,#f7b900 70%,#2f6fe8 100%)!important;border:1px solid #fff3}
+.gtile[data-id="carrom"]{background:linear-gradient(160deg,#8a5a2b,#5b3714 50%,#e9c98c)!important;border:1px solid #c9a22755}
+.gtile[data-id="aviator"]{background:linear-gradient(160deg,#0f1424,#1b2740 50%,#9f1239)!important;border:1px solid #e11d4855}
+</style>
+  `;
+  document.body.appendChild(ov);
+
+  // Fireworks on canvas
+  const cv = document.getElementById('launch-fw');
+  const g = cv.getContext('2d');
+  let W,H,rk=[],pt=[],tNext=0;
+  function size(){ W=innerWidth; H=innerHeight; cv.width=W; cv.height=H; }
+  size();
+  window.addEventListener('resize', size);
+
+  function spawn(){
+    rk.push({x:Math.random()*W, y:H, vy:-(420+Math.random()*380), ty:H*(0.15+Math.random()*0.4), h:Math.random()*360});
+  }
+  for(let i=0;i<5;i++) spawn();
+
+  let raf=null, running=true;
+  function loop(now){
+    if(!running) return;
+    g.fillStyle='rgba(10,15,42,0.18)';
+    g.fillRect(0,0,W,H);
+    if(now>tNext){ tNext=now+200+Math.random()*350; spawn(); }
+    for(const r of rk){
+      r.y+=r.vy*0.016; r.vy*=0.995;
+      g.strokeStyle=`hsl(${r.h},100%,65%)`; g.lineWidth=3;
+      g.beginPath(); g.moveTo(r.x,r.y); g.lineTo(r.x,r.y+18); g.stroke();
+      if(r.y<=r.ty){
+        r.dead=true;
+        const n=55+Math.floor(Math.random()*30), sp=140+Math.random()*160;
+        for(let i=0;i<n;i++){
+          const a=i/n*6.28+Math.random()*0.1, s=sp*(0.4+Math.random());
+          pt.push({x:r.x,y:r.y,px:r.x,py:r.y,vx:Math.cos(a)*s,vy:Math.sin(a)*s,l:1.2+Math.random()*0.8,h:r.h+Math.random()*40-20});
+        }
+        try{ if(typeof playSfx==='function') playSfx('win'); }catch(e){}
+      }
+    }
+    rk=rk.filter(r=>!r.dead);
+    g.globalCompositeOperation='lighter';
+    for(const p of pt){
+      p.px=p.x; p.py=p.y; p.x+=p.vx*0.016; p.y+=p.vy*0.016; p.vy+=120*0.016; p.vx*=0.985; p.l-=0.016;
+      g.strokeStyle=`hsla(${p.h},100%,60%,${Math.max(0,Math.min(1,p.l))})`;
+      g.lineWidth=2.2; g.beginPath(); g.moveTo(p.px,p.py); g.lineTo(p.x,p.y); g.stroke();
+    }
+    g.globalCompositeOperation='source-over';
+    pt=pt.filter(p=>p.l>0);
+    raf=requestAnimationFrame(loop);
+  }
+  raf=requestAnimationFrame(loop);
+
+  function closeCeleb(){
+    markLaunchSeen();
+    running=false;
+    if(raf) cancelAnimationFrame(raf);
+    ov.style.transition='opacity .45s';
+    ov.style.opacity='0';
+    setTimeout(()=>ov.remove(), 480);
+  }
+  document.getElementById('launch-play-btn').onclick=closeCeleb;
+  // Also allow tap outside after 2s
+  setTimeout(()=>{ ov.addEventListener('click', function(e){ if(e.target===ov) closeCeleb(); }); }, 2000);
+}
+
+// Trigger after user reaches home (logged in) — once
+(function waitLaunch(){
+  const tryShow=()=>{
+    if(typeof sessionUser!=='undefined' && sessionUser && shouldShowLaunchCeleb()){
+      setTimeout(showLaunchCelebration, 600);
+      return true;
+    }
+    return false;
+  };
+  if(tryShow()) return;
+  let n=0;
+  const iv=setInterval(()=>{
+    if(tryShow() || ++n>40) clearInterval(iv);
+  }, 500);
+})();
 
 
 console.log('%c[Games Arena V6.7] Realistic Carrom + Ludo + Pool loaded','color:#f5c542;font-weight:bold');
