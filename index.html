@@ -1695,13 +1695,19 @@ function listenFriendsMatch(gameId, bet){
       const oppPhone = m.host===sessionPhone ? m.guest : m.host;
       window._friendOpp = oppPhone;
       window._friendOppName = oppName;
-      if(stEl) stEl.innerHTML='Playing vs <b style="color:var(--gold)">'+oppName+'</b>';
+      if(stEl) stEl.innerHTML='Matched vs <b style="color:var(--gold)">'+oppName+'</b>';
       if(liveSt) liveSt.textContent='Matched vs '+oppName+'!';
-      // Host was on loading — unlock into fullscreen game
-      if(!window._friendGameStarted){
-        window._friendGameStarted = true;
+      // Host still on matching screen → open lobby (not direct game)
+      if(!window._friendGameStarted && !window._matchLobby){
         stopMatchTimer();
-        unlockFriendsGame(gameId, bet || m.bet || window._friendBet, oppName);
+        const role = m.host===sessionPhone ? 'host' : 'guest';
+        showMatchLobby({
+          role,
+          gameId,
+          bet: bet || m.bet || window._friendBet,
+          youName: sessionUser.username||sessionPhone,
+          oppName
+        });
       }
     }
 
@@ -2609,60 +2615,122 @@ async function acceptIncomingMatch(){
   const bet=Number(n.bet)||0;
   const cur=n.currency||'rs';
   const gameId=n.game;
-  currency=cur;setCurrency(cur);
+  currency=cur; setCurrency(cur);
   try{
-    if(cur==='rs'&&(Number(sessionUser.balance)||0)<bet)throw new Error('Insufficient Rs');
-    if(cur==='coins'&&(parseInt(sessionUser.coinsCommission)||0)<bet)throw new Error('Insufficient coins');
+    if(cur==='rs'&&(Number(sessionUser.balance)||0)<bet) throw new Error('Insufficient Rs');
+    if(cur==='coins'&&(parseInt(sessionUser.coinsCommission)||0)<bet) throw new Error('Insufficient coins');
 
-    // claim invite atomically — only one accepter wins
-    const claim=await db.ref('gamesHub/matchInvites/'+n.inviteKey).transaction(v=>{
-      if(!v||v.status!=='open')return;
-      if(Date.now()>(v.expires||0))return;
-      v.status='taken';v.guest=sessionPhone;v.guestName=sessionUser.username||sessionPhone;return v;
-    });
-    if(!claim.committed)throw new Error('Match already taken or expired');
+    // Claim invite (best effort)
+    if(n.inviteKey){
+      try{
+        await db.ref('gamesHub/matchInvites/'+n.inviteKey).transaction(v=>{
+          if(!v||v.status!=='open') return;
+          v.status='taken'; v.guest=sessionPhone; v.guestName=sessionUser.username||sessionPhone; return v;
+        });
+      }catch(e){}
+    }
 
     await deductBet(bet);
 
-    // Mark match playing — host listener will unlock for host too
-    const mref=db.ref('gamesHub/match/'+gameId+'/'+n.matchId);
-    const upd=await mref.transaction(m=>{
-      if(!m||m.status!=='waiting')return;
-      m.guest=sessionPhone;
-      m.guestName=sessionUser.username||sessionPhone;
-      m.status='playing';
-      m.pot=bet*2;
-      return m;
-    });
-    if(!upd.committed){
-      // refund if match room gone
-      if(cur==='rs') await db.ref('users/'+sessionPhone).transaction(u=>{ if(!u)return; u.balance=(Number(u.balance)||0)+bet; return u; });
-      else await db.ref('users/'+sessionPhone).transaction(u=>{ if(!u)return; u.coinsCommission=(parseInt(u.coinsCommission)||0)+bet; return u; });
-      throw new Error('Match no longer available');
+    // Force match to playing (create if missing)
+    const path='gamesHub/match/'+gameId+'/'+n.matchId;
+    const snap=await db.ref(path).once('value');
+    if(snap.exists()){
+      await db.ref(path).update({
+        guest: sessionPhone,
+        guestName: sessionUser.username||sessionPhone,
+        status: 'playing',
+        pot: (Number(snap.val().bet)||bet)*2,
+        readyHost: false,
+        readyGuest: false
+      });
+    } else {
+      // Host path missing — still create room so both can join
+      await db.ref(path).set({
+        status:'playing', bet, currency:cur, host:n.host,
+        hostName:n.hostName||'Host',
+        guest:sessionPhone, guestName:sessionUser.username||sessionPhone,
+        pot:bet*2, created:Date.now(), readyHost:false, readyGuest:false
+      });
     }
 
     hideMatchNotify();
     stopMatchTimer();
 
-    // Guest enters game immediately
     friendsMatchId=n.matchId;
     window._friendBet=bet;
     window._friendGame=gameId;
     window._friendOpp=n.host;
     window._friendOppName=n.hostName||'Opponent';
-    window._friendGameStarted=true;
+    window._friendGameStarted=false;
     currentGame=gameId;
     playMode='live';
     const titles={pool:'8 Ball Pool',ludo:'Ludo',carrom:'Carrom Ball'};
     try{ document.getElementById('game-title').innerText=titles[gameId]||gameId; }catch(e){}
+    go('screen-game');
     setPresenceBusy(true);
-    unlockFriendsGame(gameId, bet, window._friendOppName);
+    // Guest lobby: loading then Enter
+    showMatchLobby({
+      role:'guest',
+      gameId, bet,
+      youName: sessionUser.username||sessionPhone,
+      oppName: n.hostName||'Opponent'
+    });
     listenFriendsMatch(gameId, bet);
-    toast('Matched! Game starting','ok');
+    toast('Joined! Waiting to enter…','ok');
   }catch(e){
     toast(e.message||String(e),'err');
     hideMatchNotify();
   }
+}
+
+/** Shared lobby after match — 10s loading then Enter for both */
+function showMatchLobby({role, gameId, bet, youName, oppName}){
+  const st=document.getElementById('game-stage');
+  if(!st) return;
+  window._matchLobby={role, gameId, bet, youName, oppName, canEnter:false};
+  st.innerHTML=`<div style="text-align:center;padding:28px 16px">
+    <div style="font-size:40px;margin-bottom:8px">${gameId==='pool'?'🎱':gameId==='ludo'?'🎲':'🎯'}</div>
+    <div class="stage-title">Match Found!</div>
+    <p style="margin:12px 0 4px;font-size:15px;font-weight:700;color:#fff">You: <span style="color:var(--gold)">${esc(youName||'You')}</span></p>
+    <p style="margin:4px 0 14px;font-size:15px;font-weight:700;color:#fff">vs <span style="color:#4ade80">${esc(oppName||'Opponent')}</span></p>
+    <div class="maint-spinner" style="margin:0 auto 12px" id="lobby-spin"></div>
+    <p id="lobby-status" class="muted" style="font-weight:700">Joining… please wait</p>
+    <p id="lobby-timer" style="font-size:22px;font-weight:800;color:var(--gold);margin:10px 0">10</p>
+    <button id="lobby-enter-btn" class="btn btn-gold" style="width:100%;padding:16px;font-size:17px;display:none;margin-top:8px" onclick="enterMatchLobby()">
+      ▶ Enter Game
+    </button>
+  </div>`;
+  document.getElementById('btn-start').style.display='none';
+  document.getElementById('match-area').style.display='none';
+  let left=10;
+  if(window._lobbyIv) clearInterval(window._lobbyIv);
+  window._lobbyIv=setInterval(()=>{
+    left--;
+    const t=document.getElementById('lobby-timer');
+    if(t) t.textContent=String(Math.max(0,left));
+    if(left<=0){
+      clearInterval(window._lobbyIv); window._lobbyIv=null;
+      window._matchLobby.canEnter=true;
+      const sp=document.getElementById('lobby-spin'); if(sp) sp.style.display='none';
+      const stEl=document.getElementById('lobby-status'); if(stEl) stEl.textContent='Ready! Tap Enter Game';
+      const btn=document.getElementById('lobby-enter-btn'); if(btn) btn.style.display='block';
+    }
+  },1000);
+}
+
+function enterMatchLobby(){
+  const L=window._matchLobby;
+  if(!L||!L.canEnter) return toast('Wait for timer…','err');
+  const gameId=L.gameId, bet=L.bet, oppName=L.oppName;
+  // mark ready in firebase
+  try{
+    const key = L.role==='host' ? 'readyHost' : 'readyGuest';
+    if(friendsMatchId) db.ref('gamesHub/match/'+gameId+'/'+friendsMatchId).update({[key]:true});
+  }catch(e){}
+  window._friendGameStarted=true;
+  stopMatchTimer();
+  unlockFriendsGame(gameId, bet, oppName||'Opponent');
 }
 
 async function startCarromMatch(bet){
@@ -4269,6 +4337,11 @@ function psEnsureActionBar(){
   bar.innerHTML = '<button type="button" class="ps-btn-repeat" id="ps-repeat-btn">REPEAT</button>'+
     '<button type="button" class="ps-btn-bet" id="ps-quick-bet">BET NOW</button>';
   document.body.appendChild(bar);
+  setTimeout(function(){
+    var hb=document.getElementById('ph-active-hide');
+    if(hb) hb.onclick=function(){ bar.style.display='none'; try{localStorage.setItem('ph_active_hide','1')}catch(e){} };
+    try{ if(localStorage.getItem('ph_active_hide')==='1') bar.style.display='none'; }catch(e){}
+  },0);
   document.getElementById('ps-repeat-btn').onclick = function(){
     var v = Number(window._lastBetValue||0);
     if(!v){
@@ -4456,11 +4529,17 @@ function phEnsureActiveBar(){
   bar.innerHTML = '<div style="max-width:480px;margin:0 auto">'+
     '<div style="display:flex;justify-content:space-between;align-items:center;gap:8px">'+
     '<div style="font-size:10px;font-weight:900;color:#f5c542;letter-spacing:.04em">PLAN ACTIVE TIME</div>'+
-    '<div id="ph-active-label" style="font-size:11px;font-weight:800;color:#eef3ff">15:00</div></div>'+
+    '<div style="display:flex;align-items:center;gap:8px"><div id="ph-active-label" style="font-size:11px;font-weight:800;color:#eef3ff">15:00</div>'+
+    '<button type="button" id="ph-active-hide" style="background:#fff2;border:0;color:#fff;border-radius:6px;width:26px;height:26px;font-size:14px;cursor:pointer;line-height:1">✕</button></div></div>'+
     '<div style="margin-top:6px;height:6px;border-radius:99px;background:rgba(255,255,255,.08);overflow:hidden">'+
     '<div id="ph-active-fill" style="height:100%;width:0%;border-radius:99px;background:linear-gradient(90deg,#f5c542,#2ee59d);transition:width .4s linear"></div></div>'+
     '<div id="ph-active-status" style="font-size:9px;color:#8b97b3;margin-top:4px">App open = time chalega · band = ruk jayega</div></div>';
   document.body.appendChild(bar);
+  setTimeout(function(){
+    var hb=document.getElementById('ph-active-hide');
+    if(hb) hb.onclick=function(){ bar.style.display='none'; try{localStorage.setItem('ph_active_hide','1')}catch(e){} };
+    try{ if(localStorage.getItem('ph_active_hide')==='1') bar.style.display='none'; }catch(e){}
+  },0);
   // push body content below bar
   document.body.style.paddingTop = '52px';
 }
@@ -4618,11 +4697,17 @@ function phEnsureActiveBar(){
   bar.innerHTML = '<div style="max-width:480px;margin:0 auto">'+
     '<div style="display:flex;justify-content:space-between;align-items:center;gap:8px">'+
     '<div style="font-size:10px;font-weight:900;color:#f5c542;letter-spacing:.04em">PLAN ACTIVE TIME</div>'+
-    '<div id="ph-active-label" style="font-size:11px;font-weight:800;color:#eef3ff">15:00</div></div>'+
+    '<div style="display:flex;align-items:center;gap:8px"><div id="ph-active-label" style="font-size:11px;font-weight:800;color:#eef3ff">15:00</div>'+
+    '<button type="button" id="ph-active-hide" style="background:#fff2;border:0;color:#fff;border-radius:6px;width:26px;height:26px;font-size:14px;cursor:pointer;line-height:1">✕</button></div></div>'+
     '<div style="margin-top:6px;height:6px;border-radius:99px;background:rgba(255,255,255,.08);overflow:hidden">'+
     '<div id="ph-active-fill" style="height:100%;width:0%;border-radius:99px;background:linear-gradient(90deg,#f5c542,#2ee59d);transition:width .35s linear"></div></div>'+
     '<div id="ph-active-status" style="font-size:9px;color:#8b97b3;margin-top:4px">Saved progress · wapas open = yahi se continue</div></div>';
   document.body.appendChild(bar);
+  setTimeout(function(){
+    var hb=document.getElementById('ph-active-hide');
+    if(hb) hb.onclick=function(){ bar.style.display='none'; try{localStorage.setItem('ph_active_hide','1')}catch(e){} };
+    try{ if(localStorage.getItem('ph_active_hide')==='1') bar.style.display='none'; }catch(e){}
+  },0);
   document.body.style.paddingTop = '52px';
 }
 function phFormatRemain(sec){
