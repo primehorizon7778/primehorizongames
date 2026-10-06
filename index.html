@@ -1673,29 +1673,33 @@ async function startFriendsMatch(gameId, bet){
   await broadcastMatchInvite({game:gameId, gameName, matchId:friendsMatchId, bet, currency});
   showMatchingUI('Invite sent — waiting for accept…');
   listenFriendsMatch(gameId, bet);
-  // Backup poll — if Firebase listener misses, still detect accept
+  // Fast poll — host MUST leave Matching when guest accepts
   if(window._matchPoll) clearInterval(window._matchPoll);
+  window._hostMatchAccepted = false;
   window._matchPoll = setInterval(async ()=>{
-    if(window._friendGameStarted || window._matchLobby) { clearInterval(window._matchPoll); return; }
+    if(window._hostMatchAccepted || window._friendGameStarted) return;
     if(!friendsMatchId) return;
     try{
       const s = await db.ref('gamesHub/match/'+gameId+'/'+friendsMatchId).once('value');
       const m = s.val();
-      if(m && (m.status==='playing'||m.status==='ready') && m.guest){
-        clearInterval(window._matchPoll);
-        window._matchPoll=null;
+      if(m && m.guest && (m.status==='playing'||m.status==='ready'||m.status==='taken')){
+        window._hostMatchAccepted = true;
+        clearInterval(window._matchPoll); window._matchPoll=null;
         const oppName = m.guestName||'Opponent';
         window._friendOpp = m.guest;
         window._friendOppName = oppName;
         stopMatchTimer();
+        window._matchBackLock = false;
+        // Force UI off matching
         showMatchLobby({
-          role:'host', gameId, bet,
+          role:'host', gameId, bet: bet||m.bet||window._friendBet,
           youName: sessionUser.username||sessionPhone,
           oppName
         });
+        toast('Matched vs '+oppName+'!','ok');
       }
     }catch(e){}
-  }, 1500);
+  }, 800);
   toast('Matching started — online players notified','ok');
 }
 
@@ -1721,8 +1725,11 @@ function listenFriendsMatch(gameId, bet){
       if(stEl) stEl.innerHTML='Matched vs <b style="color:var(--gold)">'+oppName+'</b>';
       if(liveSt) liveSt.textContent='Matched vs '+oppName+'!';
       // Host still on matching screen → open lobby (not direct game)
-      if(!window._friendGameStarted && !window._matchLobby){
+      if(!window._friendGameStarted && !document.getElementById('table-fs')){
+        window._hostMatchAccepted = true;
         stopMatchTimer();
+        window._matchBackLock = false;
+        if(window._matchPoll){ clearInterval(window._matchPoll); window._matchPoll=null; }
         const role = m.host===sessionPhone ? 'host' : 'guest';
         showMatchLobby({
           role,
@@ -5719,12 +5726,22 @@ function _bootPoolPro(opts){
 
   function endShot(){
     const p=turn,o=1-p,P=shot.pots;let foul=false;msg='';
+    // Real 8-ball: must clear your group, THEN pot black (8). Early 8 = loss. Scratch on 8 = loss.
     if(shot.first==null){foul=true;msg='No ball hit. '}
-    else if(grp[p]!=null&&!inGroup(shot.first,p)&&!(shot.first==8&&left(p)==0)){foul=true;msg='Wrong ball first. '}
+    else if(grp[p]!=null&&shot.first!=8&&!inGroup(shot.first,p)){foul=true;msg='Wrong ball first. '}
+    else if(grp[p]==null&&shot.first==8){foul=true;msg='Cannot hit 8 first on open table. '}
     if(shot.cue){foul=true;msg='Scratch! '}
+
     if(P.includes(8)){
-      const w=(!foul&&grp[p]!=null&&left(p)==0)?p:o;
-      state='over';overT=0;msg=NM()[w]+' wins!';beep(784,.4);
+      let w;
+      // Win only if: your group is fully cleared AND no foul/scratch
+      if(!foul && grp[p]!=null && left(p)===0){
+        w=p; msg=NM()[p]+' pots the 8 — wins!';
+      } else {
+        // Early 8 or foul while potting 8 → LOSS
+        w=o; msg=foul?(NM()[p]+' fouled on 8 — '+NM()[o]+' wins!'):(NM()[p]+' potted 8 early — '+NM()[o]+' wins!');
+      }
+      state='over';overT=0;beep(784,.4);
       if(playMode==='live' && typeof settleFriendsMatch==='function'){
         settleFriendsMatch(w===0 ? sessionPhone : (window._friendOpp||null));
       } else if(betPlaced>0){
@@ -5736,12 +5753,22 @@ function _bootPoolPro(opts){
       if(typeof onTableGameEnd==='function') onTableGameEnd(w===0);
       return;
     }
-    if(grp[p]==null&&!foul){const f=P.find(n=>n!=8);if(f!=null){grp[p]=f<8?0:1;grp[o]=1-grp[p];msg+=NM()[p]+' has '+(grp[p]?'stripes. ':'solids. ')}}
+    // Assign solids/stripes from first legally potted object ball (not 8)
+    if(grp[p]==null&&!foul){
+      const f=P.find(n=>n!=8);
+      if(f!=null){ grp[p]=f<8?0:1; grp[o]=1-grp[p]; msg+=NM()[p]+' has '+(grp[p]?'stripes. ':'solids. '); }
+    }
     const cont=!foul&&grp[p]!=null&&P.some(n=>inGroup(n,p));
     if(!cont)turn=o;
     tl=15;
-    if(foul){state='place';if(cue.gone){cue.gone=false;cue.x=200;cue.y=200;cue.vx=cue.vy=0}msg+=NM()[turn]+(human()?': place the cue ball':' places the cue ball')}
-    else{state='aim';msg+=cont?NM()[p]+' goes again':NM()[turn]+"'s turn"}
+    if(foul){
+      state='place';
+      if(cue.gone){cue.gone=false;cue.x=200;cue.y=200;cue.vx=cue.vy=0}
+      msg+=NM()[turn]+(human()?': place the cue ball':' places the cue ball');
+    } else {
+      state='aim';
+      msg+=cont?NM()[p]+' goes again':NM()[turn]+"'s turn";
+    }
     sl=ap=pl=null;maybeBot()}
   function timeUp(){
     if(state=='place'){if(ov())return;state='aim';tl=10;return}
