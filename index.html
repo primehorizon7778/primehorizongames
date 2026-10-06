@@ -825,7 +825,7 @@ function loginWithPhone(force,silent){
     if(!snap.exists())return toast('Account not found','err');
     const ban=await db.ref('gamesHub/bans/'+phone).once('value');
     if(ban.exists()){ const r=(ban.val()||{}).reason||'Violation'; showBanOverlay(r); toast('Account banned: '+r,'err'); return; }
-    sessionUser=snap.val();sessionPhone=phone;localStorage.setItem('ph_session_phone',phone);
+    sessionUser=snap.val();sessionPhone=phone;localStorage.setItem('ph_session_phone',phone); try{attachHostPingListener();}catch(e){}
     // presence for chat
     db.ref('gamesHub/presence/'+phone).set({username:sessionUser.username||phone,dp:sessionUser.dp||sessionUser.photo||'',online:true,ts:Date.now()});
     db.ref('gamesHub/presence/'+phone).onDisconnect().update({online:false,ts:Date.now()});
@@ -1673,38 +1673,57 @@ async function startFriendsMatch(gameId, bet){
   await broadcastMatchInvite({game:gameId, gameName, matchId:friendsMatchId, bet, currency});
   showMatchingUI('Invite sent — waiting for accept…');
   listenFriendsMatch(gameId, bet);
-  // Fast poll — host MUST leave Matching when guest accepts
-  if(window._matchPoll) clearInterval(window._matchPoll);
+  // Host: listen hostPing + poll match path
   window._hostMatchAccepted = false;
+  try{ attachHostPingListener(); }catch(e){}
+  function hostEnterLobby(oppName, oppPhone, b){
+    if(window._hostMatchAccepted || window._friendGameStarted) return;
+    window._hostMatchAccepted = true;
+    if(window._matchPoll){ clearInterval(window._matchPoll); window._matchPoll=null; }
+    if(window._hostPingUnsub){ try{ window._hostPingUnsub(); }catch(e){} window._hostPingUnsub=null; }
+    window._friendOpp = oppPhone||null;
+    window._friendOppName = oppName||'Opponent';
+    stopMatchTimer();
+    window._matchBackLock = false;
+    showMatchLobby({
+      role:'host', gameId, bet: b||bet||window._friendBet,
+      youName: sessionUser.username||sessionPhone,
+      oppName: oppName||'Opponent'
+    });
+    toast('Matched vs '+(oppName||'Opponent')+'!','ok');
+  }
+  // Direct ping from guest
+  try{
+    if(window._hostPingUnsub) try{ window._hostPingUnsub(); }catch(e){}
+    const pref = db.ref('gamesHub/hostPing/'+sessionPhone);
+    const pcb = pref.on('value', snap=>{
+      const v = snap.val(); if(!v) return;
+      if(v.matchId && (v.matchId===friendsMatchId || !friendsMatchId)){
+        if(v.game && v.game!==gameId) return;
+        hostEnterLobby(v.guestName, v.guest, v.bet);
+        try{ pref.remove(); }catch(e){}
+      }
+    });
+    window._hostPingUnsub = ()=> pref.off('value', pcb);
+  }catch(e){}
+  // Backup poll every 700ms
+  if(window._matchPoll) clearInterval(window._matchPoll);
   window._matchPoll = setInterval(async ()=>{
     if(window._hostMatchAccepted || window._friendGameStarted) return;
     if(!friendsMatchId) return;
     try{
       const s = await db.ref('gamesHub/match/'+gameId+'/'+friendsMatchId).once('value');
       const m = s.val();
-      if(m && m.guest && (m.status==='playing'||m.status==='ready'||m.status==='taken')){
-        window._hostMatchAccepted = true;
-        clearInterval(window._matchPoll); window._matchPoll=null;
-        const oppName = m.guestName||'Opponent';
-        window._friendOpp = m.guest;
-        window._friendOppName = oppName;
-        stopMatchTimer();
-        window._matchBackLock = false;
-        // Force UI off matching
-        showMatchLobby({
-          role:'host', gameId, bet: bet||m.bet||window._friendBet,
-          youName: sessionUser.username||sessionPhone,
-          oppName
-        });
-        toast('Matched vs '+oppName+'!','ok');
+      if(m && m.guest && (m.status==='playing'||m.status==='ready')){
+        hostEnterLobby(m.guestName||'Opponent', m.guest, m.bet);
       }
     }catch(e){}
-  }, 800);
+  }, 700);
   toast('Matching started — online players notified','ok');
 }
 
 function listenFriendsMatch(gameId, bet){
-  if(friendsMatchUnsub) try{friendsMatchUnsub()}catch(e){}
+  try{ if(typeof friendsMatchUnsub==='function') friendsMatchUnsub(); }catch(e){}
   const r = db.ref('gamesHub/match/'+gameId+'/'+friendsMatchId);
   const cb = r.on('value', async snap=>{
     const m = snap.val(); if(!m) return;
@@ -1811,7 +1830,7 @@ async function cancelFriendsMatch(){
     await db.ref('gamesHub/match/'+gameId+'/'+friendsMatchId).update({status:'cancelled'});
     toast('Match cancelled — refunded','ok');
   }
-  friendsMatchId=null;
+  friendsMatchId=null; if(typeof friendsMatchUnsub==='undefined'){ var friendsMatchUnsub=null; };
   window._friendGameStarted=false;
   window._matchBackLock=false;
   document.getElementById('match-area').style.display='none';
@@ -2544,7 +2563,7 @@ function setupCarromPieces(){
 function setPresenceBusy(busy){
   window._userBusy = !!busy;
   try{
-    if(sessionPhone) db.ref('gamesHub/presence/'+sessionPhone).update({ busy: !!busy, busyGame: busy? (currentGame||'') : null, ts: Date.now() });
+    if(sessionPhone) db.ref('gamesHub/presence/'+sessionPhone).update({ online:true, busy: !!busy, busyGame: busy? (currentGame||'') : null, ts: Date.now() });
   }catch(e){}
 }
 
@@ -2668,22 +2687,35 @@ async function acceptIncomingMatch(){
     // Force match to playing (create if missing)
     const path='gamesHub/match/'+gameId+'/'+n.matchId;
     const snap=await db.ref(path).once('value');
+    const guestName=sessionUser.username||sessionPhone;
     if(snap.exists()){
       await db.ref(path).update({
         guest: sessionPhone,
-        guestName: sessionUser.username||sessionPhone,
+        guestName: guestName,
         status: 'playing',
         pot: (Number(snap.val().bet)||bet)*2,
         readyHost: false,
-        readyGuest: false
+        readyGuest: false,
+        acceptedAt: Date.now()
       });
     } else {
-      // Host path missing — still create room so both can join
       await db.ref(path).set({
         status:'playing', bet, currency:cur, host:n.host,
         hostName:n.hostName||'Host',
-        guest:sessionPhone, guestName:sessionUser.username||sessionPhone,
-        pot:bet*2, created:Date.now(), readyHost:false, readyGuest:false
+        guest:sessionPhone, guestName: guestName,
+        pot:bet*2, created:Date.now(), readyHost:false, readyGuest:false,
+        acceptedAt: Date.now()
+      });
+    }
+    // DIRECT ping host so they leave Matching immediately
+    if(n.host){
+      await db.ref('gamesHub/hostPing/'+n.host).set({
+        matchId: n.matchId,
+        game: gameId,
+        bet: bet,
+        guest: sessionPhone,
+        guestName: guestName,
+        ts: Date.now()
       });
     }
 
@@ -3288,7 +3320,7 @@ if(typeof loginWithPhone === 'function'){
       if(!snap.exists())return toast('Account not found','err');
       const ban=await db.ref('gamesHub/bans/'+phone).once('value');
       if(ban.exists()){ const r=(ban.val()||{}).reason||'Violation'; showBanOverlay(r); toast('Account banned: '+r,'err'); return; }
-      sessionUser=snap.val();sessionPhone=phone;localStorage.setItem('ph_session_phone',phone);
+      sessionUser=snap.val();sessionPhone=phone;localStorage.setItem('ph_session_phone',phone); try{attachHostPingListener();}catch(e){}
       sessionStartTs=Date.now(); playMinutesWarned=false;
       db.ref('gamesHub/presence/'+phone).set({username:sessionUser.username||phone,dp:sessionUser.dp||sessionUser.photo||'',online:true,ts:Date.now()});
       db.ref('gamesHub/presence/'+phone).onDisconnect().update({online:false,ts:Date.now()});
@@ -6050,6 +6082,7 @@ function showLaunchCelebration(){
 }
 
 // Trigger after user reaches home (logged in) — once
+try{ if(typeof sessionPhone!=='undefined'&&sessionPhone) attachHostPingListener(); }catch(e){}
 (function waitLaunch(){
   const tryShow=()=>{
     if(typeof sessionUser!=='undefined' && sessionUser && shouldShowLaunchCeleb()){
@@ -6065,6 +6098,46 @@ function showLaunchCelebration(){
   }, 500);
 })();
 
+
+
+/* Global hostPing — host leaves Matching the moment guest accepts */
+function attachHostPingListener(){
+  if(!sessionPhone || window._globalHostPing) return;
+  try{
+    const pref = db.ref('gamesHub/hostPing/'+sessionPhone);
+    const pcb = pref.on('value', snap=>{
+      const v = snap.val(); if(!v || !v.ts) return;
+      // only fresh pings (60s)
+      if(Date.now()-(v.ts||0) > 60000) return;
+      if(window._hostMatchAccepted || window._friendGameStarted) return;
+      // Accept this match
+      const gameId = v.game || currentGame;
+      const bet = v.bet || window._friendBet || 10;
+      friendsMatchId = v.matchId || friendsMatchId;
+      window._friendOpp = v.guest;
+      window._friendOppName = v.guestName || 'Opponent';
+      window._friendBet = bet;
+      window._friendGame = gameId;
+      currentGame = gameId;
+      playMode = 'live';
+      window._hostMatchAccepted = true;
+      stopMatchTimer();
+      window._matchBackLock = false;
+      if(window._matchPoll){ clearInterval(window._matchPoll); window._matchPoll=null; }
+      try{ pref.remove(); }catch(e){}
+      const titles={pool:'8 Ball Pool',ludo:'Ludo',carrom:'Carrom Ball'};
+      try{ document.getElementById('game-title').innerText=titles[gameId]||gameId; }catch(e){}
+      try{ go('screen-game'); }catch(e){}
+      showMatchLobby({
+        role:'host', gameId, bet,
+        youName: (sessionUser&&(sessionUser.username||sessionUser.name))||sessionPhone,
+        oppName: v.guestName||'Opponent'
+      });
+      toast('Matched vs '+(v.guestName||'Opponent')+'!','ok');
+    });
+    window._globalHostPing = ()=> pref.off('value', pcb);
+  }catch(e){ console.warn('hostPing attach', e); }
+}
 
 console.log('%c[Games Arena V6.7] Realistic Carrom + Ludo + Pool loaded','color:#f5c542;font-weight:bold');
 
