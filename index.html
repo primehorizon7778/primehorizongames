@@ -658,7 +658,7 @@ label{display:block;font-size:10px;font-weight:700;color:var(--muted);margin-bot
 <script>
 const firebaseConfig={apiKey:"AIzaSyA-6ZngcQRagHV3MEtTUoYoyfZgT8OqaF4",databaseURL:"https://nazim-8c4cf-default-rtdb.firebaseio.com",projectId:"nazim-8c4cf",storageBucket:"nazim-8c4cf.firebasestorage.app"};
 firebase.initializeApp(firebaseConfig);const db=firebase.database();
-const TAX_LIVE=0.025, GIFT_TAX=0.30, COIN_RATE=100; // live pot tax ~2.5% (10+10→18, 100+100→195) // 100 coins = Rs 1
+const TAX_LIVE=0.10, GIFT_TAX=0.30, COIN_RATE=100; // live pot tax 10% (50+50→90 win, 10 company) // 100 coins = Rs 1
 
 const GAMES=[
   {id:'aviator',name:'Sky Rise',ico:'✈️',ds:'Crash · cash out',live:false,intro:'Cash out before the plane flies away.'},
@@ -1673,6 +1673,29 @@ async function startFriendsMatch(gameId, bet){
   await broadcastMatchInvite({game:gameId, gameName, matchId:friendsMatchId, bet, currency});
   showMatchingUI('Invite sent — waiting for accept…');
   listenFriendsMatch(gameId, bet);
+  // Backup poll — if Firebase listener misses, still detect accept
+  if(window._matchPoll) clearInterval(window._matchPoll);
+  window._matchPoll = setInterval(async ()=>{
+    if(window._friendGameStarted || window._matchLobby) { clearInterval(window._matchPoll); return; }
+    if(!friendsMatchId) return;
+    try{
+      const s = await db.ref('gamesHub/match/'+gameId+'/'+friendsMatchId).once('value');
+      const m = s.val();
+      if(m && (m.status==='playing'||m.status==='ready') && m.guest){
+        clearInterval(window._matchPoll);
+        window._matchPoll=null;
+        const oppName = m.guestName||'Opponent';
+        window._friendOpp = m.guest;
+        window._friendOppName = oppName;
+        stopMatchTimer();
+        showMatchLobby({
+          role:'host', gameId, bet,
+          youName: sessionUser.username||sessionPhone,
+          oppName
+        });
+      }
+    }catch(e){}
+  }, 1500);
   toast('Matching started — online players notified','ok');
 }
 
@@ -1767,6 +1790,9 @@ async function settleFriendsMatch(winnerPhone){
 
 async function cancelFriendsMatch(){
   stopMatchTimer();
+  if(window._matchPoll){clearInterval(window._matchPoll);window._matchPoll=null;}
+  if(window._lobbyIv){clearInterval(window._lobbyIv);window._lobbyIv=null;}
+  window._matchLobby=null;
   if(!friendsMatchId || !currentGame){ window._matchBackLock=false; if(currentGame) renderModeSelect(currentGame); return; }
   const gameId = currentGame;
   const snap = await db.ref('gamesHub/match/'+gameId+'/'+friendsMatchId).once('value');
@@ -2713,15 +2739,21 @@ function showMatchLobby({role, gameId, bet, youName, oppName}){
       clearInterval(window._lobbyIv); window._lobbyIv=null;
       window._matchLobby.canEnter=true;
       const sp=document.getElementById('lobby-spin'); if(sp) sp.style.display='none';
-      const stEl=document.getElementById('lobby-status'); if(stEl) stEl.textContent='Ready! Tap Enter Game';
-      const btn=document.getElementById('lobby-enter-btn'); if(btn) btn.style.display='block';
+      const stEl=document.getElementById('lobby-status'); if(stEl) stEl.textContent='Entering game…';
+      const btn=document.getElementById('lobby-enter-btn'); if(btn) btn.style.display='none';
+      // Auto enter both sides
+      try{ enterMatchLobby(); }catch(e){ console.error(e); }
     }
   },1000);
 }
 
 function enterMatchLobby(){
   const L=window._matchLobby;
-  if(!L||!L.canEnter) return toast('Wait for timer…','err');
+  if(!L) return;
+  if(!L.canEnter) return; // auto-call may race
+  if(window._matchPoll){ clearInterval(window._matchPoll); window._matchPoll=null; }
+  if(window._friendGameStarted && document.getElementById('table-fs')) return; // already in
+
   const gameId=L.gameId, bet=L.bet, oppName=L.oppName;
   // mark ready in firebase
   try{
