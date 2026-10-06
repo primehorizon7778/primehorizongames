@@ -370,9 +370,10 @@ label{display:block;font-size:10px;font-weight:700;color:var(--muted);margin-bot
 
 
 <div class="match-notify" id="match-notify">
-  <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
-    <div style="font-weight:900;color:var(--gold)" id="match-notify-title">🎮 Match Request</div>
+  <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;gap:8px">
+    <div style="font-weight:900;color:var(--gold);flex:1" id="match-notify-title">🎮 Match Request</div>
     <div class="muted" style="font-size:11px;font-weight:800" id="match-notify-timer">30s</div>
+    <button type="button" onclick="hideMatchNotify()" style="background:#fff2;border:0;color:#fff;border-radius:8px;width:32px;height:32px;font-size:16px;cursor:pointer" title="Hide">✕</button>
   </div>
   <div class="muted" id="match-notify-body">Player wants to play</div>
   <div style="display:flex;gap:8px;margin-top:12px">
@@ -1689,15 +1690,18 @@ function listenFriendsMatch(gameId, bet){
       return;
     }
 
-    if(m.status==='playing'){
+    if(m.status==='playing' || m.status==='ready'){
       const oppName = m.host===sessionPhone ? (m.guestName||'Guest') : (m.hostName||'Host');
       const oppPhone = m.host===sessionPhone ? m.guest : m.host;
       window._friendOpp = oppPhone;
       window._friendOppName = oppName;
       if(stEl) stEl.innerHTML='Playing vs <b style="color:var(--gold)">'+oppName+'</b>';
+      if(liveSt) liveSt.textContent='Matched vs '+oppName+'!';
+      // Host was on loading — unlock into fullscreen game
       if(!window._friendGameStarted){
         window._friendGameStarted = true;
-        unlockFriendsGame(gameId, bet, oppName);
+        stopMatchTimer();
+        unlockFriendsGame(gameId, bet || m.bet || window._friendBet, oppName);
       }
     }
 
@@ -2604,12 +2608,13 @@ async function acceptIncomingMatch(){
   const n=pendingMatch;
   const bet=Number(n.bet)||0;
   const cur=n.currency||'rs';
+  const gameId=n.game;
   currency=cur;setCurrency(cur);
   try{
     if(cur==='rs'&&(Number(sessionUser.balance)||0)<bet)throw new Error('Insufficient Rs');
     if(cur==='coins'&&(parseInt(sessionUser.coinsCommission)||0)<bet)throw new Error('Insufficient coins');
 
-    // claim invite atomically
+    // claim invite atomically — only one accepter wins
     const claim=await db.ref('gamesHub/matchInvites/'+n.inviteKey).transaction(v=>{
       if(!v||v.status!=='open')return;
       if(Date.now()>(v.expires||0))return;
@@ -2619,48 +2624,41 @@ async function acceptIncomingMatch(){
 
     await deductBet(bet);
 
-    if(n.game==='carrom'){
-      carromMatchId=n.matchId;
-      await db.ref('gamesHub/match/carrom/'+n.matchId).transaction(m=>{
-        if(!m||m.status!=='waiting')return;
-        m.guest=sessionPhone;m.guestName=sessionUser.username||sessionPhone;
-        m.status='playing';m.pot=bet*2;return m;
-      });
-      hideMatchNotify();
-      currentGame='carrom';playMode='live';
-      document.getElementById('game-title').innerText='Carrom Ball';
-      go('screen-game');
-      document.getElementById('mode-tabs').style.display='none';
-      const st=document.getElementById('game-stage');st.innerHTML=carromHTML();setupCarromPieces();
-      document.getElementById('btn-carrom-leave').style.display='block';
-      document.getElementById('btn-carrom-hit').style.display='block';
-      listenCarrom(bet);
-      toast('Matched! Game started','ok');
-      return;
-    }
-
-    if(n.game==='cards'){
-      roomId=n.matchId;
-      await db.ref('gamesHub/match/cards/'+n.matchId).transaction(m=>{
-        if(!m||m.status!=='waiting')return;
-        m.guest=sessionPhone;m.guestName=sessionUser.username||sessionPhone;
-        m.status='ready';m.pot=bet*2;return m;
-      });
-      hideMatchNotify();
-      currentGame='cards';playMode='live';
-      document.getElementById('game-title').innerText='High Card';
-      go('screen-game');
-      document.getElementById('mode-tabs').style.display='flex';
-      setMode('live');
-      const st=document.getElementById('game-stage');st.innerHTML=cardsHTML();
-      document.getElementById('match-area').style.display='block';
-      document.getElementById('match-status').innerHTML='Matched!';
-      listenMatch(bet);
-      toast('Matched! High Card starting','ok');
-      return;
+    // Mark match playing — host listener will unlock for host too
+    const mref=db.ref('gamesHub/match/'+gameId+'/'+n.matchId);
+    const upd=await mref.transaction(m=>{
+      if(!m||m.status!=='waiting')return;
+      m.guest=sessionPhone;
+      m.guestName=sessionUser.username||sessionPhone;
+      m.status='playing';
+      m.pot=bet*2;
+      return m;
+    });
+    if(!upd.committed){
+      // refund if match room gone
+      if(cur==='rs') await db.ref('users/'+sessionPhone).transaction(u=>{ if(!u)return; u.balance=(Number(u.balance)||0)+bet; return u; });
+      else await db.ref('users/'+sessionPhone).transaction(u=>{ if(!u)return; u.coinsCommission=(parseInt(u.coinsCommission)||0)+bet; return u; });
+      throw new Error('Match no longer available');
     }
 
     hideMatchNotify();
+    stopMatchTimer();
+
+    // Guest enters game immediately
+    friendsMatchId=n.matchId;
+    window._friendBet=bet;
+    window._friendGame=gameId;
+    window._friendOpp=n.host;
+    window._friendOppName=n.hostName||'Opponent';
+    window._friendGameStarted=true;
+    currentGame=gameId;
+    playMode='live';
+    const titles={pool:'8 Ball Pool',ludo:'Ludo',carrom:'Carrom Ball'};
+    try{ document.getElementById('game-title').innerText=titles[gameId]||gameId; }catch(e){}
+    setPresenceBusy(true);
+    unlockFriendsGame(gameId, bet, window._friendOppName);
+    listenFriendsMatch(gameId, bet);
+    toast('Matched! Game starting','ok');
   }catch(e){
     toast(e.message||String(e),'err');
     hideMatchNotify();
