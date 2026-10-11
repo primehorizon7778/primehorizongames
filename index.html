@@ -1663,6 +1663,51 @@ window.__eliteSpendCoins = async function(newCoins){
 };
 
 
+
+const TURN_SEC = 20;
+window._friendsTurnTimer = null;
+window._friendsTurnDeadline = 0;
+function clearFriendsTurnTimer(){
+  if(window._friendsTurnTimer){ clearInterval(window._friendsTurnTimer); window._friendsTurnTimer=null; }
+  const el=document.getElementById('friends-turn-timer');
+  if(el) el.remove();
+}
+function startFriendsTurnTimer(isMyTurn){
+  clearFriendsTurnTimer();
+  if(playMode!=='live' || !friendsMatchId) return;
+  window._friendsTurnDeadline = Date.now() + TURN_SEC*1000;
+  const host = document.getElementById('table-fs')||document.body;
+  let el = document.getElementById('friends-turn-timer');
+  if(!el){
+    el = document.createElement('div');
+    el.id = 'friends-turn-timer';
+    el.style.cssText = 'position:absolute;top:10px;left:50%;transform:translateX(-50%);z-index:30;background:rgba(0,0,0,.75);border:1px solid rgba(245,197,66,.35);border-radius:20px;padding:6px 14px;font-weight:800;font-size:13px;color:#fff';
+    host.appendChild(el);
+  }
+  el.textContent = (isMyTurn?'Your turn · ':'Opponent · ')+TURN_SEC+'s';
+  window._friendsTurnTimer = setInterval(function(){
+    const left = Math.max(0, Math.ceil((window._friendsTurnDeadline - Date.now())/1000));
+    el.textContent = (isMyTurn?'Your turn · ':'Opponent · ')+left+'s';
+    if(left<=0){
+      clearFriendsTurnTimer();
+      if(isMyTurn){
+        // Auto play on my side
+        try{
+          const fr = document.getElementById('elite-pool-frame')||document.getElementById('elite-ludo-frame');
+          if(fr && fr.contentWindow){
+            if(fr.contentWindow.__eliteAutoPlay) fr.contentWindow.__eliteAutoPlay();
+            if(fr.contentWindow.__ludoAutoPlay) fr.contentWindow.__ludoAutoPlay();
+          }
+        }catch(e){}
+      }
+    }
+  }, 250);
+}
+// Restart timer when remote turn updates
+window.__onFriendsTurnChange = function(turn, mySeat){
+  startFriendsTurnTimer(turn===mySeat);
+};
+
 window.__poolPublishShot = function(d){
   try{
     if(typeof friendsMatchId==='undefined' || !friendsMatchId || !currentGame) return;
@@ -1677,8 +1722,32 @@ window.__poolPublishTurn = function(d){
     db.ref('gamesHub/match/'+currentGame+'/'+friendsMatchId+'/state').update({
       turn: d.turn, phase: d.state, msg: d.msg||'', ts: Date.now()
     });
+    // local timer: host seat 0, guest seat 1
+    const mySeat = (window._friendRole==='guest')?1:0;
+    if(typeof startFriendsTurnTimer==='function') startFriendsTurnTimer(d.turn===mySeat);
   }catch(e){}
 };
+
+function attachMatchStateListener(){
+  if(!friendsMatchId || !currentGame) return;
+  if(window._matchStateUnsub) try{ window._matchStateUnsub(); }catch(e){}
+  const ref = db.ref('gamesHub/match/'+currentGame+'/'+friendsMatchId);
+  const cb = ref.on('value', snap=>{
+    const m = snap.val(); if(!m) return;
+    // Opponent left while we play
+    if(m.status==='done' && m.leftBy && m.leftBy!==sessionPhone && m.winner===sessionPhone){
+      if(document.getElementById('table-fs') && !document.getElementById('opp-left-overlay')){
+        showOpponentLeftWin(m);
+      }
+    }
+    if(m.state && m.state.turn!=null){
+      const mySeat = (window._friendRole==='guest')?1:0;
+      if(typeof startFriendsTurnTimer==='function') startFriendsTurnTimer(m.state.turn===mySeat);
+    }
+  });
+  window._matchStateUnsub = ()=> ref.off('value', cb);
+}
+
 function attachPoolRemoteListener(){
   if(typeof friendsMatchId==='undefined' || !friendsMatchId || !currentGame) return;
   if(window._poolShotUnsub) try{ window._poolShotUnsub(); }catch(e){}
@@ -1962,7 +2031,7 @@ function bootElitePoolIframe(opts){
     const url = URL.createObjectURL(blob);
     fr.onload = function(){ try{ URL.revokeObjectURL(url); }catch(e){} };
     fr.src = url;
-    if(!opts.vsBot) setTimeout(function(){ try{ attachPoolRemoteListener(); }catch(e){} }, 800);
+    if(!opts.vsBot) setTimeout(function(){ try{ attachPoolRemoteListener(); attachMatchStateListener(); const mySeat=(window._friendRole==='guest')?1:0; startFriendsTurnTimer(true); }catch(e){} }, 800);
   }catch(e){
     console.error('blob fail', e);
     try{ fr.srcdoc = html; }catch(e2){ toast('Pool load failed','err'); }
@@ -2004,6 +2073,7 @@ function openTableFullscreen(gameId, bet, oppName, vsBot){
   } else if(gameId==='pool'){
     stage.innerHTML=`<div id="pool-pro-wrap" style="position:absolute;inset:0;background:#0a0f2a;overflow:hidden"><iframe id="elite-pool-frame" style="width:100%;height:100%;border:0;display:block;background:#0a0f2a" allow="autoplay"></iframe></div>`;
     try{ screen.orientation && screen.orientation.lock && screen.orientation.lock('landscape').catch(()=>{}); }catch(e){}
+    if(!vsBot) window._friendRole = window._friendRole||'host';
     bootElitePoolIframe({vsBot:!!vsBot, oppName:oppName||'Computer', bet:bet||0});
   } else if(gameId==='carrom'){
     stage.innerHTML=realCarromHTML();
@@ -2031,15 +2101,25 @@ function resumeTableGame(){
 async function leaveTableGame(){
   if(!confirm('Leave game? You will LOSE the match.')) return;
   const fs=window._tableFS||{};
-  // Settle as loss if friends or bet
-  if(playMode==='live' && typeof settleFriendsMatch==='function'){
-    await settleFriendsMatch(window._friendOpp||null); // opponent wins
-  } else if(fs.bet>0){
-    toast('You left — bet lost','err');
-  }
+  // Notify opponent: I left → they win
+  try{
+    if(playMode==='live' && friendsMatchId && (window._friendGame||currentGame)){
+      const gid = window._friendGame||currentGame;
+      await db.ref('gamesHub/match/'+gid+'/'+friendsMatchId).update({
+        status:'done',
+        leftBy: sessionPhone,
+        winner: window._friendOpp||null,
+        reason:'leave',
+        ts: Date.now()
+      });
+      // opponent settles via listener; also settle here for leaver (no credit)
+      await settleFriendsMatch(window._friendOpp||null);
+    } else if(fs.bet>0){
+      toast('You left — bet lost','err');
+    }
+  }catch(e){ console.error(e); }
   closeTableFullscreen();
-  toast('You left the game','err');
-  // back to mode select
+  toast('You left — You lose','err');
   if(currentGame) renderModeSelect(currentGame);
 }
 
@@ -2273,6 +2353,7 @@ function listenFriendsMatch(gameId, bet){
         window._matchBackLock = false;
         if(window._matchPoll){ clearInterval(window._matchPoll); window._matchPoll=null; }
         const role = m.host===sessionPhone ? 'host' : 'guest';
+        window._friendRole = role;
         showMatchLobby({
           role,
           gameId,
@@ -2285,8 +2366,32 @@ function listenFriendsMatch(gameId, bet){
 
     if(m.status==='done'){
       const youWin = m.winner===sessionPhone;
-      if(stEl) stEl.innerHTML = youWin ? 'You won!' : (m.winner?'You lost':'Draw');
-      toast(youWin?'You won the match!':'Match over', youWin?'ok':'err');
+      const leftByOpp = m.leftBy && m.leftBy!==sessionPhone;
+      if(stEl) stEl.innerHTML = youWin ? (leftByOpp?'Opponent left — You win!':'You won!') : (m.winner?'You lost':'Draw');
+      // If opponent left while we are in table FS — show overlay + claim
+      if(youWin && leftByOpp && document.getElementById('table-fs')){
+        showOpponentLeftWin(m);
+      } else {
+        toast(youWin?(leftByOpp?'Opponent left — You win!':'You won the match!'):'Match over', youWin?'ok':'err');
+      }
+      // Credit if we are winner and not yet credited (settle may have run on leaver side)
+      if(youWin && m.winner===sessionPhone && !m.credited){
+        try{
+          const pot = m.pot || (m.bet*2);
+          const tax = liveTax(pot, gameId);
+          const winAmt = Math.round((pot - tax)*100)/100;
+          await db.ref('users/'+sessionPhone).transaction(u=>{
+            if(!u) return;
+            if(m.currency==='rs') u.balance=(Number(u.balance)||0)+winAmt;
+            else u.coinsCommission=(parseInt(u.coinsCommission)||0)+winAmt;
+            return u;
+          });
+          await db.ref('gamesHub/match/'+gameId+'/'+friendsMatchId).update({credited:true});
+          window._pendingClaim={winAmt,tax,pot,bet:m.bet,currency:m.currency||currency,game:gameId};
+          if(typeof showPoolClaimUI==='function') showPoolClaimUI(winAmt, tax, pot);
+          try{ pushWinFeed(sessionUser.username||sessionPhone, gameId, winAmt, m.currency||currency); }catch(e){}
+        }catch(e){ console.error(e); }
+      }
       window._friendGameStarted = false;
       document.getElementById('btn-start').style.display='block';
       document.getElementById('btn-start').innerText='Start Game';
@@ -2312,6 +2417,31 @@ function liveTax(pot, gameId){
   const rate = (gameId==='pool') ? POOL_TAX : TAX_LIVE;
   return Math.round(Number(pot||0) * rate * 100) / 100;
 }
+
+function showOpponentLeftWin(m){
+  try{
+    const host = document.getElementById('table-fs')||document.body;
+    let box = document.getElementById('opp-left-overlay');
+    if(box) box.remove();
+    box = document.createElement('div');
+    box.id = 'opp-left-overlay';
+    box.style.cssText = 'position:absolute;inset:0;z-index:50;background:rgba(0,0,0,.85);display:flex;align-items:center;justify-content:center;padding:16px';
+    const pot = (m&&m.pot)||((m&&m.bet)||0)*2;
+    const tax = liveTax(pot, (m&&m.game)||currentGame);
+    const winAmt = Math.round((pot-tax)*100)/100;
+    const unit = ((m&&m.currency)||currency)==='rs'?'Rs ':'';
+    const suf = ((m&&m.currency)||currency)==='coins'?' coins':'';
+    box.innerHTML = '<div style="background:#141e30;border:1px solid rgba(46,229,157,.4);border-radius:18px;padding:22px 18px;max-width:340px;width:100%;text-align:center">'+
+      '<div style="font-size:22px;font-weight:900;color:#2ee59d;margin-bottom:8px">Opponent left</div>'+
+      '<div style="font-size:15px;color:#e8ecf4;margin-bottom:6px">You win this match</div>'+
+      '<div style="font-size:26px;font-weight:900;color:var(--gold);margin:12px 0">'+unit+winAmt+suf+'</div>'+
+      '<button class="btn btn-gold" style="width:100%;padding:14px" onclick="document.getElementById(\'opp-left-overlay\')?.remove();if(window._pendingClaim)claimPoolReward();else closeTableFullscreen();">Claim reward</button>'+
+      '</div>';
+    host.appendChild(box);
+    window._pendingClaim={winAmt,tax,pot,bet:(m&&m.bet)||0,currency:(m&&m.currency)||currency,game:currentGame};
+  }catch(e){ console.error(e); }
+}
+
 async function settleFriendsMatch(winnerPhone){
   if(!friendsMatchId || !window._friendGame) return;
   const gameId = window._friendGame;
@@ -3533,6 +3663,33 @@ function showBanOverlay(reason){
   if(el) el.classList.add('open');
 }
 
+
+/** Ensure users see current release notes */
+async function seedWhatsNewRelease(){
+  try{
+    const key = 'release_v67_elite';
+    const ref = db.ref('gamesHub/whatsNew/'+key);
+    const snap = await ref.once('value');
+    const body =
+`Elite Pool, Elite Ludo aur Aviator ab live hain.
+Friends ya Computer ke sath khelo — jeeto to reward claim karo.
+
+Shop se items lo, naye UI ka maza lo.
+Carrom Ball jald aa raha hai.`;
+    const payload = {
+      title: "New Games Live",
+      description: body,
+      body: body,
+      ts: Date.now(),
+      byName: "Prime Horizon",
+      version: "V6.7",
+      pinned: true
+    };
+    // Always refresh content so users get latest text; keep same key
+    await ref.set(payload);
+  }catch(e){ console.warn('wn seed', e); }
+}
+
 async function fetchWhatsNewItems(){
   const snap = await db.ref('gamesHub/whatsNew').once('value');
   if(!snap.exists()) return [];
@@ -3590,7 +3747,10 @@ async function openWhatsNew(fromAuto){
   ov.classList.add('open');
   try{
     const items = await fetchWhatsNewItems();
-    if(!items.length){ list.innerHTML = '<p class="muted">No updates yet.</p>'; return; }
+    if(!items.length){
+      list.innerHTML = '<div class="wn-card"><h3>Welcome</h3><div class="wn-desc">New games and updates will appear here. Check back soon!</div></div>';
+      return;
+    }
     list.innerHTML = items.map(it=>{
       const imgs = Array.isArray(it.images) ? it.images : (it.image ? [it.image] : (it.imageUrl ? [it.imageUrl] : []));
       const byName = it.byName || it.author || it.adminName || 'Admin';
@@ -6820,7 +6980,18 @@ function maybeBot(){if(!human()&&state!='over'&&state!='move')setTimeout(bot,900
 function ov(){return balls.some(b=>Math.hypot(b.x-cue.x,b.y-cue.y)<2*R)}
 function shoot(vx,vy){cue.vx=vx;cue.vy=vy;state='move';pw=0;sl=ap=null;shot={pots:[],cue:false,first:null};tone(150,.14,.6,'sine',60);clack(500)}
 function stats(p){return(vsBot&&p==1)?{P:3,A:5,C:5}:eqStats()}
-function shootP(){const s=stats(turn),v=(250+pw*1400)*(1+.04*(s.P-1)),e=vsBot?Math.max(0,.03-.0028*s.C)*pw*(Math.random()*2-1):0;const vx=Math.cos(ang+e)*v,vy=Math.sin(ang+e)*v;shoot(vx,vy);
+function canControl(){
+  try{
+    const eo=window.__eliteOpts||{};
+    if(eo.vsBot!==false && vsBot) return true;
+    if(vsBot) return true;
+    const seat = (typeof mySeat==='function')?mySeat():0;
+    return turn===seat;
+  }catch(e){ return true; }
+}
+function shootP(){
+  if(!canControl()) return;
+const s=stats(turn),v=(250+pw*1400)*(1+.04*(s.P-1)),e=vsBot?Math.max(0,.03-.0028*s.C)*pw*(Math.random()*2-1):0;const vx=Math.cos(ang+e)*v,vy=Math.sin(ang+e)*v;shoot(vx,vy);
 try{ const eo=window.__eliteOpts||{}; if(!vsBot&&eo.matchId&&window.parent&&window.parent.__poolPublishShot){ window.parent.__poolPublishShot({ang,pw,vx,vy,turn,by:eo.role}); } }catch(e){}
 }
 
@@ -6908,6 +7079,7 @@ if(v.y<LY()||v.y>LB())return;
 for(let i=0;i<10;i++){const[b1,b2]=btnRects(i),inb=b=>v.x>b.x&&v.x<b.x+b.w&&v.y>b.y&&v.y<b.y+b.h;
 if(inb(b1)){if(SAVE.own[i]){SAVE.eq=i;beep(660,.1)}else if(SAVE.coins>=STK[i].pr){SAVE.coins-=STK[i].pr;SAVE.own[i]=1;SAVE.eq=i;beep(880,.2);setTimeout(()=>beep(1175,.2),120);persist();syncCoinsToParent()}else beep(150,.2,'square');persist();return}
 if(inb(b2)&&SAVE.own[i]&&lvl(i)<5){const c=upCost(i);if(SAVE.coins>=c){SAVE.coins-=c;SAVE.own[i]++;beep(700,.15);setTimeout(()=>beep(1000,.2),100);persist();syncCoinsToParent()}else beep(150,.2,'square');persist();return}}}
+cv.addEventListener('pointerdown',function(e0){ if(typeof canControl==='function'&&!canControl()){e0.preventDefault();return;} },true);
 cv.addEventListener('pointerdown',e=>{
 if(!fsOn){fsOn=true;goFS()}
 const v=vp(e);
@@ -7237,6 +7409,13 @@ g=main}
 let G={phase:'roll',act:[0,1,2,3],pos:[0,1,2,3].map(()=>[-1,-1,-1,-1]),turn:HUM,dice:1,sixes:0,opts:[]};
 let V={},fx=[],FW={rk:[],pt:[],t:0},rolling=false,DF=[0,0,0,0],stepBadge=null,msg='',sad={},winner=-1,blinkP=-1,shop=false,tab=0,scroll=0,sd=null,popup=0;
 const human=()=>G.turn==HUM;
+window.__ludoAutoPlay=function(){
+  try{
+    if(G.phase==='roll'&&human()){ roll(); return; }
+    if(G.phase==='pick'&&human()&&G.opts&&G.opts.length){ move(G.turn, G.opts[0]); }
+  }catch(e){}
+};
+
 function newGame(){
   // Elite Ludo: 2 players only — seat 3 You, seat 1 opposite (samen)
   try{
@@ -7389,6 +7568,7 @@ persist()}})}
 /* ================= input ================= */
 const vp=e=>rot?{x:innerHeight-e.clientY,y:e.clientX}:{x:e.clientX,y:e.clientY};
 function goFS(){const el=document.documentElement;try{Promise.resolve((el.requestFullscreen||el.webkitRequestFullscreen).call(el)).catch(()=>{})}catch(e){}}
+cv.addEventListener('pointerdown',function(e0){ if(typeof canControl==='function'&&!canControl()){e0.preventDefault();return;} },true);
 cv.addEventListener('pointerdown',e=>{
 if(!fsOn){fsOn=true;goFS()}
 const v=vp(e);
@@ -7417,6 +7597,17 @@ layout();newGame();requestAnimationFrame(loop);
 <\/script>
 
 </body></html>
+
+window.__eliteAutoPlay=function(){
+  try{
+    if(state==='move'||state==='over') return;
+    if(!canControl()) return;
+    // random weak shot
+    ang = ang||0;
+    pw = 0.35+Math.random()*0.35;
+    shootP();
+  }catch(e){}
+};
 </script>
 
 
